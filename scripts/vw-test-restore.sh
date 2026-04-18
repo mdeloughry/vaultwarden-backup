@@ -18,6 +18,7 @@ set -euo pipefail
 ENV_FILE="${VW_BACKUP_ENV:-/etc/vaultwarden-backup/backup.env}"
 TEST_DIR="/tmp/vw-restore-test"
 TEST_PORT="${TEST_PORT:-18080}"
+TEST_HTTPS_PORT="${TEST_HTTPS_PORT:-18443}"
 TEST_CONTAINER="vw-restore-test"
 
 # ──────────────── Parse args ────────────────
@@ -65,8 +66,10 @@ esac
 
 cleanup() {
     echo ""
-    echo "[cleanup] Stopping test container..."
-    docker rm -f "$TEST_CONTAINER" 2>/dev/null || true
+    echo "[cleanup] Stopping test containers..."
+    docker rm -f "$TEST_CONTAINER" "${TEST_CONTAINER}-caddy" 2>/dev/null || true
+    echo "[cleanup] Removing test network..."
+    docker network rm vw-test-net 2>/dev/null || true
     echo "[cleanup] Removing $TEST_DIR..."
     rm -rf "$TEST_DIR"
     echo "[cleanup] Done."
@@ -86,7 +89,12 @@ echo ""
 # ──────────────── List snapshots ────────────────
 
 echo "[1/5] Listing recent snapshots in $DEST repo..."
-restic -r "$REPO" snapshots --latest 5
+# Use --latest N if supported (restic 0.17+), fall back to plain snapshots
+if restic -r "$REPO" snapshots --latest 5 2>/dev/null; then
+    :
+else
+    restic -r "$REPO" snapshots
+fi
 
 # ──────────────── Restore ────────────────
 
@@ -140,7 +148,12 @@ echo "    ✓ Organizations: $ORG_COUNT"
 # ──────────────── Optional: live test container ────────────────
 
 echo ""
-read -p "[5/5] Start a test Vaultwarden container on port $TEST_PORT to verify login? [y/N] " -n 1 -r REPLY
+echo "[5/5] Start a test Vaultwarden container to verify login?"
+echo "      This spins up a disposable Vaultwarden on port $TEST_PORT (HTTP)"
+echo "      and optionally a Caddy reverse proxy on port $TEST_HTTPS_PORT (HTTPS)"
+echo "      with a self-signed certificate so you can test mobile/desktop apps."
+echo ""
+read -p "      Continue? [y/N] " -n 1 -r REPLY
 echo ""
 
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -152,46 +165,169 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# Stop any existing test container
-docker rm -f "$TEST_CONTAINER" 2>/dev/null || true
+read -p "      Also start HTTPS proxy with self-signed cert? [Y/n] " -n 1 -r HTTPS_REPLY
+echo ""
+USE_HTTPS=1
+[[ $HTTPS_REPLY =~ ^[Nn]$ ]] && USE_HTTPS=0
+
+# Determine host IP for mobile device testing
+HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+# Prefer Tailscale IP if available (reachable from phone over tailnet)
+if command -v tailscale >/dev/null 2>&1; then
+    TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
+    [ -n "$TS_IP" ] && HOST_IP="$TS_IP"
+fi
+[ -z "$HOST_IP" ] && HOST_IP="localhost"
+
+# Stop any existing test containers
+docker rm -f "$TEST_CONTAINER" "${TEST_CONTAINER}-caddy" 2>/dev/null || true
+
+# Determine the DOMAIN Vaultwarden should report
+if [ "$USE_HTTPS" -eq 1 ]; then
+    VW_DOMAIN="https://$HOST_IP:$TEST_HTTPS_PORT"
+else
+    VW_DOMAIN="http://$HOST_IP:$TEST_PORT"
+fi
 
 echo ""
-echo "Starting test container..."
+echo "Starting test Vaultwarden container..."
 docker run -d \
     --name "$TEST_CONTAINER" \
     -v "$EXTRACT_DIR:/data" \
     -p "$TEST_PORT:80" \
-    -e DOMAIN="http://localhost:$TEST_PORT" \
+    -e DOMAIN="$VW_DOMAIN" \
     -e SIGNUPS_ALLOWED=false \
-    -e WEBSOCKET_ENABLED=false \
-    vaultwarden/server:latest
+    -e WEBSOCKET_ENABLED=true \
+    vaultwarden/server:latest >/dev/null
 
-echo ""
-echo "Waiting for container to be ready..."
-for i in {1..15}; do
+echo "Waiting for Vaultwarden to respond..."
+for i in {1..20}; do
     if curl -sf "http://localhost:$TEST_PORT/alive" >/dev/null 2>&1; then
-        echo "    ✓ Container is responding"
+        echo "    ✓ Vaultwarden is responding"
         break
     fi
     sleep 1
 done
 
+# ──────────────── Self-signed HTTPS via Caddy ────────────────
+
+if [ "$USE_HTTPS" -eq 1 ]; then
+    CADDY_DIR="$TEST_DIR/caddy"
+    mkdir -p "$CADDY_DIR/certs"
+
+    echo ""
+    echo "Generating self-signed certificate for $HOST_IP..."
+
+    # Build SAN config: include the host IP, localhost, and hostname
+    cat > "$CADDY_DIR/openssl.cnf" <<EOF
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = $HOST_IP
+
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = localhost
+DNS.2 = $(hostname)
+IP.1 = 127.0.0.1
+IP.2 = $HOST_IP
+EOF
+
+    openssl req -x509 -nodes -newkey rsa:2048 \
+        -keyout "$CADDY_DIR/certs/test.key" \
+        -out "$CADDY_DIR/certs/test.crt" \
+        -days 7 \
+        -config "$CADDY_DIR/openssl.cnf" \
+        -extensions v3_req 2>/dev/null
+
+    chmod 644 "$CADDY_DIR/certs/test.crt" "$CADDY_DIR/certs/test.key"
+
+    # Caddyfile with manual TLS and reverse proxy
+    cat > "$CADDY_DIR/Caddyfile" <<EOF
+{
+    auto_https off
+    admin off
+}
+
+:443 {
+    tls /certs/test.crt /certs/test.key
+    reverse_proxy vaultwarden-upstream:80
+}
+EOF
+
+    echo "Starting Caddy HTTPS proxy..."
+    # Create a small network so Caddy can reach Vaultwarden by name
+    NET_NAME="vw-test-net"
+    docker network create "$NET_NAME" 2>/dev/null || true
+    docker network connect --alias vaultwarden-upstream "$NET_NAME" "$TEST_CONTAINER" 2>/dev/null || true
+
+    docker run -d \
+        --name "${TEST_CONTAINER}-caddy" \
+        --network "$NET_NAME" \
+        -v "$CADDY_DIR/Caddyfile:/etc/caddy/Caddyfile:ro" \
+        -v "$CADDY_DIR/certs:/certs:ro" \
+        -p "$TEST_HTTPS_PORT:443" \
+        caddy:latest >/dev/null
+
+    echo "Waiting for HTTPS proxy to respond..."
+    for i in {1..15}; do
+        if curl -ksf "https://localhost:$TEST_HTTPS_PORT/alive" >/dev/null 2>&1; then
+            echo "    ✓ HTTPS proxy is responding"
+            break
+        fi
+        sleep 1
+    done
+
+    CERT_FINGERPRINT=$(openssl x509 -in "$CADDY_DIR/certs/test.crt" -noout -fingerprint -sha256 | cut -d= -f2)
+fi
+
+# ──────────────── Summary + wait ────────────────
+
 echo ""
 echo "╔════════════════════════════════════════════════════════════╗"
-echo "║  Test vault ready!                                         ║"
+echo "║  Test vault ready                                          ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
-echo "  URL:    http://localhost:$TEST_PORT"
-echo "  Login:  use your actual Vaultwarden master password"
-echo ""
-echo "  Verify that:"
-echo "    1. You can log in"
-echo "    2. Your recent items are all present"
-echo "    3. TOTP codes generate correctly"
-echo "    4. Shared org items appear"
-echo ""
-echo "  When done, press Ctrl+C here to clean up."
+echo "  Web vault (HTTP,  browser on this machine):"
+echo "    http://localhost:$TEST_PORT"
 echo ""
 
-# Follow the logs so they can see what's happening
+if [ "$USE_HTTPS" -eq 1 ]; then
+    echo "  Web vault (HTTPS, self-signed):"
+    echo "    https://$HOST_IP:$TEST_HTTPS_PORT"
+    echo "    https://localhost:$TEST_HTTPS_PORT"
+    echo ""
+    echo "  Certificate fingerprint (SHA256):"
+    echo "    $CERT_FINGERPRINT"
+    echo ""
+    echo "  To test with Bitwarden mobile/desktop apps:"
+    echo "    1. Browser will warn about self-signed cert — click through"
+    echo "       (Safari/Chrome: Advanced → Proceed anyway)"
+    echo "    2. Mobile apps may refuse self-signed certs entirely — in that"
+    echo "       case install the cert on the device first, or just test via"
+    echo "       a browser instead."
+    echo "    3. Point app at: https://$HOST_IP:$TEST_HTTPS_PORT"
+    echo ""
+    echo "  Cert + Caddyfile are at: $CADDY_DIR"
+fi
+
+echo "  Login: your actual Vaultwarden master password"
+echo ""
+echo "  Verify:"
+echo "    • You can log in"
+echo "    • Recent items are present"
+echo "    • TOTP codes generate"
+echo "    • Shared org items appear"
+echo ""
+echo "  Press Ctrl+C to clean up and exit."
+echo ""
+echo "─── Vaultwarden logs ─────────────────────────────────────────"
+
 docker logs -f "$TEST_CONTAINER"

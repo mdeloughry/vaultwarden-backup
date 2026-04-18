@@ -59,7 +59,11 @@ echo "Will overwrite:  $VW_DATA"
 echo ""
 
 echo "Recent snapshots in $DEST:"
-restic -r "$REPO" snapshots --latest 5
+if restic -r "$REPO" snapshots --latest 5 2>/dev/null; then
+    :
+else
+    restic -r "$REPO" snapshots
+fi
 echo ""
 
 read -p "Type 'RESTORE' to proceed: " CONFIRM

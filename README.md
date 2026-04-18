@@ -99,7 +99,14 @@ sudo vw-test-restore.sh b2             # latest from B2
 sudo vw-test-restore.sh r2 abc123      # specific snapshot from R2
 ```
 
-This restores to `/tmp/vw-restore-test`, runs SQLite integrity checks, and optionally starts a test Vaultwarden container on port `18080`. Clean up is automatic on exit.
+This restores to `/tmp/vw-restore-test`, runs SQLite integrity checks, and optionally starts a disposable test Vaultwarden container:
+
+- **HTTP** on port `18080` (override with `TEST_PORT`) — browser on the same host
+- **HTTPS** on port `18443` (override with `TEST_HTTPS_PORT`) — serves via Caddy with an auto-generated self-signed cert valid for 7 days, so you can point Bitwarden mobile/desktop apps at it and test real login flows
+
+The self-signed cert includes the machine's primary IP, Tailscale IP (if available), localhost, and hostname as Subject Alternative Names. Your browser will warn about the unknown issuer — click through. Some mobile apps refuse self-signed certs entirely; in that case, test via a browser.
+
+Cleanup is automatic on exit (Ctrl+C) — containers stopped, network removed, restored data wiped.
 
 ### Production restore (disaster recovery)
 
