@@ -1,0 +1,18 @@
+# Never commit actual config with real credentials
+config/backup.env
+*.env
+!*.env.example
+
+# Restic passwords
+restic-pw
+*.pw
+
+# Logs
+*.log
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
