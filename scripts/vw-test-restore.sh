@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ENV_FILE="${VW_BACKUP_ENV:-/etc/vaultwarden-backup/backup.env}"
-TEST_DIR="/tmp/vw-restore-test"
+TEST_DIR=""
 TEST_PORT="${TEST_PORT:-18080}"
 TEST_HTTPS_PORT="${TEST_HTTPS_PORT:-18443}"
 TEST_CONTAINER="vw-restore-test"
@@ -64,14 +64,19 @@ esac
 
 # ──────────────── Cleanup trap ────────────────
 
+# Create secure temporary directory now that arguments are validated
+TEST_DIR=$(mktemp -d -t vw-restore-XXXXXX)
+
 cleanup() {
     echo ""
     echo "[cleanup] Stopping test containers..."
     docker rm -f "$TEST_CONTAINER" "${TEST_CONTAINER}-caddy" 2>/dev/null || true
     echo "[cleanup] Removing test network..."
     docker network rm vw-test-net 2>/dev/null || true
-    echo "[cleanup] Removing $TEST_DIR..."
-    rm -rf "$TEST_DIR"
+    if [ -n "${TEST_DIR:-}" ] && [ -d "$TEST_DIR" ]; then
+        echo "[cleanup] Removing $TEST_DIR..."
+        rm -rf "$TEST_DIR"
+    fi
     echo "[cleanup] Done."
 }
 trap cleanup EXIT INT TERM
@@ -171,13 +176,19 @@ USE_HTTPS=1
 [[ $HTTPS_REPLY =~ ^[Nn]$ ]] && USE_HTTPS=0
 
 # Determine host IP for mobile device testing
-HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-# Prefer Tailscale IP if available (reachable from phone over tailnet)
-if command -v tailscale >/dev/null 2>&1; then
-    TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
-    [ -n "$TS_IP" ] && HOST_IP="$TS_IP"
+if [ -z "${HOST_IP:-}" ]; then
+    HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+    # Prefer Tailscale IP if available (reachable from phone over tailnet)
+    if command -v tailscale >/dev/null 2>&1; then
+        TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+        if [ -n "$TS_IP" ]; then
+            HOST_IP="$TS_IP"
+        fi
+    fi
+    if [ -z "$HOST_IP" ]; then
+        HOST_IP="localhost"
+    fi
 fi
-[ -z "$HOST_IP" ] && HOST_IP="localhost"
 
 # Stop any existing test containers
 docker rm -f "$TEST_CONTAINER" "${TEST_CONTAINER}-caddy" 2>/dev/null || true
@@ -219,6 +230,14 @@ if [ "$USE_HTTPS" -eq 1 ]; then
     echo "Generating self-signed certificate for $HOST_IP..."
 
     # Build SAN config: include the host IP, localhost, and hostname
+    # Validate if HOST_IP is a valid IPv4 address
+    alt_names_config="DNS.1 = localhost\nDNS.2 = $(hostname)\nIP.1 = 127.0.0.1"
+    if [[ "$HOST_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        alt_names_config="${alt_names_config}\nIP.2 = $HOST_IP"
+    else
+        alt_names_config="${alt_names_config}\nDNS.3 = $HOST_IP"
+    fi
+
     cat > "$CADDY_DIR/openssl.cnf" <<EOF
 [req]
 distinguished_name = req_distinguished_name
@@ -229,15 +248,12 @@ prompt = no
 CN = $HOST_IP
 
 [v3_req]
-keyUsage = keyEncipherment, dataEncipherment
+keyUsage = digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = @alt_names
 
 [alt_names]
-DNS.1 = localhost
-DNS.2 = $(hostname)
-IP.1 = 127.0.0.1
-IP.2 = $HOST_IP
+$(echo -e "$alt_names_config")
 EOF
 
     openssl req -x509 -nodes -newkey rsa:2048 \

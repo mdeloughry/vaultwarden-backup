@@ -1,0 +1,81 @@
+#!/bin/bash
+echo "MOCK RESTIC: $*" >> "$MOCK_RESTIC_LOG"
+
+REPO=""
+TARGET_DIR=""
+CMD=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -r)
+            REPO="$2"
+            shift 2
+            ;;
+        --target)
+            TARGET_DIR="$2"
+            shift 2
+            ;;
+        --password-file|--tag|--host|--compression|--read-data-subset|--latest|--keep-daily|--keep-weekly|--keep-monthly)
+            shift 2
+            ;;
+        -*)
+            shift
+            ;;
+        init|backup|forget|snapshots|check|restore|prune)
+            CMD="$1"
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+case "$CMD" in
+    init)
+        echo "Mock init success"
+        exit 0
+        ;;
+    backup)
+        if [ "${MOCK_RESTIC_FAIL_BACKUP:-0}" -eq 1 ]; then
+            echo "Mock backup error" >&2
+            exit 1
+        fi
+        echo "Mock backup success"
+        exit 0
+        ;;
+    forget)
+        echo "Mock forget success"
+        exit 0
+        ;;
+    snapshots)
+        echo "Mock snapshots list:"
+        echo 'ID        Time                 Host        Tags        Paths'
+        echo '----------------------------------------------------------------------'
+        echo 'abc123def  2026-05-22 10:00:00  test-host   vaultwarden /tmp/vw-backup'
+        exit 0
+        ;;
+    check)
+        if [ "${MOCK_RESTIC_FAIL_CHECK:-0}" -eq 1 ]; then
+            echo "Mock check error: integrity compromised" >&2
+            exit 1
+        fi
+        echo "Mock check success"
+        exit 0
+        ;;
+    restore)
+        if [ -n "$TARGET_DIR" ]; then
+            mkdir -p "$TARGET_DIR"
+            cp "$MOCK_RESTORE_SOURCE_DB" "$TARGET_DIR/db.sqlite3"
+            cp "$MOCK_RESTORE_SOURCE_TAR" "$TARGET_DIR/vw-data.tar.gz"
+            echo "Mock restore success to $TARGET_DIR"
+            exit 0
+        else
+            echo "Error: --target not specified" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Unknown restic command: $CMD" >&2
+        exit 1
+        ;;
+esac

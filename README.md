@@ -4,6 +4,7 @@ Encrypted, automated backups of a self-hosted Vaultwarden instance to **local di
 
 ## What this does
 
+- **`vw-tui`** — interactive Text User Interface (TUI) to run backups, view logs, browse snapshots, edit config, and trigger test/production restores in one dashboard.
 - **`vw-backup.sh`** — nightly backup script. Snapshots SQLite cleanly (no downtime), archives the data directory, pushes encrypted snapshots to all three destinations, applies a retention policy.
 - **`vw-test-restore.sh`** — restores any snapshot to a throwaway location, runs integrity checks, optionally spins up a test Vaultwarden container on a different port so you can log in and verify.
 - **`vw-restore.sh`** — production restore. Stops your live Vaultwarden, preserves current data as `.pre-restore-TIMESTAMP`, restores the chosen snapshot, restarts the container.
@@ -69,7 +70,15 @@ sudo bash -c '
 
 ## Usage
 
-### Run a backup
+### Manage via TUI
+
+For an interactive dashboard to trigger backups, consistency checks, view logs, browse snapshots, edit config, and run test or production restores, run:
+
+```bash
+sudo vw-tui
+```
+
+### Run a backup manually
 
 ```bash
 sudo vw-backup.sh

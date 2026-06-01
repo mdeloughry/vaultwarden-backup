@@ -100,12 +100,24 @@ fi
 
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_PATH="${VW_DATA}.pre-restore-${TIMESTAMP}"
+PRESERVE_BACKUP=0
+
+DETECTED_UID=""
+DETECTED_GID=""
+if [ -d "$VW_DATA" ]; then
+    DETECTED_UID=$(stat -c '%u' "$VW_DATA" 2>/dev/null || echo "")
+    DETECTED_GID=$(stat -c '%g' "$VW_DATA" 2>/dev/null || echo "")
+elif [ -d "$(dirname "$VW_DATA")" ]; then
+    DETECTED_UID=$(stat -c '%u' "$(dirname "$VW_DATA")" 2>/dev/null || echo "")
+    DETECTED_GID=$(stat -c '%g' "$(dirname "$VW_DATA")" 2>/dev/null || echo "")
+fi
 
 if [ -d "$VW_DATA" ] && [ "$(ls -A "$VW_DATA" 2>/dev/null)" ]; then
     echo ""
     echo "[2/5] Moving existing data to $BACKUP_PATH..."
     mv "$VW_DATA" "$BACKUP_PATH"
     mkdir -p "$VW_DATA"
+    PRESERVE_BACKUP=1
 else
     echo ""
     echo "[2/5] No existing data to preserve."
@@ -126,7 +138,9 @@ DB_FILE=$(find "$RESTORE_STAGING" -name "db.sqlite3" | head -1)
 
 if [ ! -f "$TAR_FILE" ] || [ ! -f "$DB_FILE" ]; then
     echo "ERROR: Restore did not produce expected files."
-    echo "Your original data is still safe at $BACKUP_PATH"
+    if [ "$PRESERVE_BACKUP" -eq 1 ]; then
+        echo "Your original data is still safe at $BACKUP_PATH"
+    fi
     rm -rf "$RESTORE_STAGING"
     exit 1
 fi
@@ -135,13 +149,38 @@ fi
 
 echo ""
 echo "[4/5] Extracting data to $VW_DATA..."
-tar xzf "$TAR_FILE" -C "$VW_DATA"
-cp "$DB_FILE" "$VW_DATA/db.sqlite3"
 
-# Fix ownership — Vaultwarden typically runs as UID 1000 in the container
-if [ -n "${VW_UID:-}" ] && [ -n "${VW_GID:-}" ]; then
-    chown -R "$VW_UID:$VW_GID" "$VW_DATA"
-    echo "    Set ownership to $VW_UID:$VW_GID"
+if ! { tar xzf "$TAR_FILE" -C "$VW_DATA" && cp "$DB_FILE" "$VW_DATA/db.sqlite3"; }; then
+    echo ""
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║ ❌  CRITICAL ERROR: Extraction failed!                      ║"
+    echo "║                                                            ║"
+    echo "║ The live directory '$VW_DATA' may be incomplete or corrupt.║"
+    if [ "$PRESERVE_BACKUP" -eq 1 ]; then
+        echo "║ Your original data is preserved at:                        ║"
+        echo "║   $BACKUP_PATH                                             ║"
+        echo "║                                                            ║"
+        echo "║ To roll back, run:                                         ║"
+        echo "║   sudo rm -rf '$VW_DATA'                                   ║"
+        echo "║   sudo mv '$BACKUP_PATH' '$VW_DATA'                         ║"
+    else
+        echo "║ There was no previous data to roll back to.                ║"
+    fi
+    echo "╚════════════════════════════════════════════════════════════╝"
+    echo ""
+    rm -rf "$RESTORE_STAGING"
+    exit 1
+fi
+
+# Fix ownership — Fallback to detected owner if VW_UID/VW_GID are not configured
+FINAL_UID="${VW_UID:-$DETECTED_UID}"
+FINAL_GID="${VW_GID:-$DETECTED_GID}"
+
+if [ -n "$FINAL_UID" ] && [ -n "$FINAL_GID" ]; then
+    chown -R "$FINAL_UID:$FINAL_GID" "$VW_DATA"
+    echo "    Set ownership to $FINAL_UID:$FINAL_GID"
+else
+    echo "    WARN: No owner UID/GID configured or detected; files left with default permissions."
 fi
 
 rm -rf "$RESTORE_STAGING"
@@ -179,8 +218,12 @@ echo "╔═══════════════════════�
 echo "║  ✓ Restore complete                                        ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
-echo "  Previous data preserved at: $BACKUP_PATH"
-echo "  Delete it once you've verified the restore:"
-echo "    sudo rm -rf '$BACKUP_PATH'"
-echo ""
-echo "  Test login via web vault before deleting the backup!"
+if [ "$PRESERVE_BACKUP" -eq 1 ]; then
+    echo "  Previous data preserved at: $BACKUP_PATH"
+    echo "  Delete it once you've verified the restore:"
+    echo "    sudo rm -rf '$BACKUP_PATH'"
+    echo ""
+    echo "  Test login via web vault before deleting the backup!"
+else
+    echo "  No previous data existed to preserve."
+fi

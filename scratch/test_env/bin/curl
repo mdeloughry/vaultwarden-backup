@@ -1,0 +1,10 @@
+#!/bin/bash
+echo "MOCK CURL CALLED WITH: $*" >> "$MOCK_CURL_LOG"
+# Write stdin to log
+if [ -t 0 ]; then
+    :
+else
+    cat >> "$MOCK_CURL_LOG"
+    echo "" >> "$MOCK_CURL_LOG"
+fi
+exit 0

@@ -1,0 +1,9 @@
+#!/bin/bash
+echo "MOCK DOCKER: $*" >> "$MOCK_DOCKER_LOG"
+if [ "$1" = "inspect" ]; then
+    echo "running"
+fi
+if [ "$1" = "logs" ] && [ "$2" = "-f" ]; then
+    cp "$TEST_ROOT"/vw-restore-*/caddy/openssl.cnf "$TEST_ROOT/openssl.cnf" 2>/dev/null || true
+fi
+exit 0
