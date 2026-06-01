@@ -202,19 +202,34 @@ def draw_box(stdscr, y, x, h, w, title=None, double=True, color_pair=0):
         
     stdscr.attron(curses.color_pair(color_pair))
     # Draw horizontal borders
-    stdscr.addstr(y, x, tl + h_line * (w - 2) + tr)
-    stdscr.addstr(y + h - 1, x, bl + h_line * (w - 2) + br)
+    try:
+        stdscr.addstr(y, x, tl + h_line * (w - 2) + tr)
+    except curses.error:
+        pass
+    try:
+        stdscr.addstr(y + h - 1, x, bl + h_line * (w - 2) + br)
+    except curses.error:
+        pass
     # Draw vertical borders
     for i in range(1, h - 1):
-        stdscr.addstr(y + i, x, v_line)
-        stdscr.addstr(y + i, x + w - 1, v_line)
+        try:
+            stdscr.addstr(y + i, x, v_line)
+        except curses.error:
+            pass
+        try:
+            stdscr.addstr(y + i, x + w - 1, v_line)
+        except curses.error:
+            pass
         
     if title:
         title = f" {title} "
         if len(title) > w - 4:
             title = title[:w - 7] + "... "
         title_x = x + (w - len(title)) // 2
-        stdscr.addstr(y, title_x, title, curses.A_BOLD | curses.color_pair(color_pair))
+        try:
+            stdscr.addstr(y, title_x, title, curses.A_BOLD | curses.color_pair(color_pair))
+        except curses.error:
+            pass
     stdscr.attroff(curses.color_pair(color_pair))
 
 # ──────────────── Main TUI Loop ────────────────
